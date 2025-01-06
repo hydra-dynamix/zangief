@@ -105,11 +105,25 @@ source venv/bin/activate
 
 `pip install -r m2m_miner_requirements.txt`
 
+AND
+
+`pip install -r requirements.txt`
+
 4) Register the miner
 
 `comx module register <name> <your_commune_key> --netuid 1 --ip <your_ip> --port <your_port>`
 
-5) Run the miner
+5) `env/config.ini` (sample) ENSURE your config file is set
+```
+[miner]
+keyfile = miner
+url = http://0.0.0.0:5000/
+isTestnet = 0
+openai_key = YOUR_OPENAI_KEY
+model = gpt-3.5-turbo
+```
+
+6) Run the miner
 
 ```
 python src/zangief/miner/miner.py --miner m2m
