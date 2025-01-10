@@ -1,0 +1,16 @@
+.git
+.gitignore
+.env.example
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+logs/
+*.log
+.pytest_cache/
+.coverage
+htmlcov/
+docs/
+test/

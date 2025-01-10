@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  validator:
+    image: ghcr.io/${GITHUB_REPOSITORY:-opentensor/zangief-validator}:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: zangief-validator
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+      - ~/.commune/key:/root/.commune/key
+    environment:
+      - PYTHONPATH=/app/src
+      - TESTNET=0
+      - VALIDATOR_CALL_TIMEOUT=20
+      - VALIDATOR_INTERVAL=10
+    restart: unless-stopped
+    networks:
+      - zangief-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8000')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+networks:
+  zangief-net:
+    driver: bridge

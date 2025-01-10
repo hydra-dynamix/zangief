@@ -10,6 +10,7 @@
 .venv
 weights1.json
 testing.py
+**/__pycache__
 
 
 node_modules

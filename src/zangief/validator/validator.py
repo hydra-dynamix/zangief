@@ -7,7 +7,9 @@ from functools import partial
 import numpy as np
 import random
 import argparse
-from typing import cast, Any, Dict
+import asyncio
+import logging
+from typing import cast, Any, Dict, List
 
 from communex.client import CommuneClient
 from communex.module.client import ModuleClient
@@ -21,10 +23,10 @@ from substrateinterface import Keypair
 
 from loguru import logger
 
-from weights_io import ensure_weights_file, write_weight_file, read_weight_file
-from power_scaling import conditional_power_scaling
-from reward import Reward
-from prompt_datasets.cc_100 import CC100
+from .weights_io import ensure_weights_file, write_weight_file, read_weight_file
+from .power_scaling import conditional_power_scaling
+from .reward import Reward
+from .prompt_datasets.cc_100 import CC100
 
 from zangief.config.validator import ValidatorConfig
 
@@ -85,17 +87,24 @@ def get_netuid(is_testnet):
 
 
 def normalize_scores(scores):
-    min_score = min(scores)
-    max_score = max(scores)
+    """Normalize scores to sum to 1.0"""
+    if not scores:  # Handle empty sequence
+        return []
+    if all(s == 0 for s in scores):  # Handle all zeros
+        return [1.0/len(scores)] * len(scores)
+    total = sum(scores)
+    if total == 0:  # Another check for zero sum
+        return [1.0/len(scores)] * len(scores)
+    return [s/total for s in scores]
 
-    if min_score == max_score:
-        # If all scores are the same, give all ones
-        return [1] * len(scores)
 
-    # Normalize scores from 0 to 1
-    normalized_scores = [(score - min_score) / (max_score - min_score) for score in scores]
-
-    return normalized_scores
+def conditional_power_scaling(scores):
+    """Apply power scaling to scores"""
+    if not scores:  # Handle empty sequence
+        return []
+    if all(s == 0 for s in scores):  # Handle all zeros
+        return [1.0/len(scores)] * len(scores)
+    return scores  # For now, return scores as is, we can add power scaling later if needed
 
 
 class TranslateValidator(Module):
@@ -138,19 +147,35 @@ class TranslateValidator(Module):
         self.weights_file = os.path.join(self.zangief_dir, "weights.json")
         ensure_weights_file(zangief_dir_name=self.zangief_dir, weights_file_name=self.weights_file)
         write_weight_file(self.weights_file, {})
-
+        self.keys_map = self.get_key(self.client, self.netuid)
+        self.addresses_map = self.get_addresses(self.client, self.netuid)
+        
+        # Log the initial maps
+        logger.info(f"Netuid: {self.netuid}")
+        logger.info(f"Initial keys map size: {len(self.keys_map) if isinstance(self.keys_map, dict) else 'unknown'}")
+        logger.info(f"Initial addresses map size: {len(self.addresses_map) if isinstance(self.addresses_map, dict) else 'unknown'}")
+        logger.debug(f"Keys map: {self.keys_map}")
+        logger.debug(f"Addresses map: {self.addresses_map}")
+        
+        self.miner_info_list = []
         self.reward = Reward()
-        self.languages = []
-        self.datasets = {}
-        self.load_languages()
+        
+        # Just load the list of available languages
+        logger.info("Loading available languages...")
+        self.cc_100 = CC100()
+        self.languages = self.cc_100.selected_languages
+        logger.info(f"Found {len(self.languages)} available languages")
 
     def load_languages(self):
-        cc_100 = CC100()
-        self.languages = cc_100.selected_languages
-        self.datasets = {
-            l: [cc_100] for
-            l in self.languages
-        }
+        """
+        Load languages and datasets once and store them in memory
+        """
+        try:
+            # Load CC-100 dataset
+            logger.info(f"Successfully loaded {len(self.languages)} languages")
+        except Exception as e:
+            logger.error(f"Error loading languages: {e}")
+            raise
 
     def get_addresses(self, client: CommuneClient, netuid: int) -> dict[int, str]:
         """
@@ -163,8 +188,28 @@ class TranslateValidator(Module):
         Returns:
             A dictionary mapping module IDs to their addresses.
         """
-        module_addresses = client.query_map_address(netuid)
-        return module_addresses
+        try:
+            return client.query_map_address(netuid)
+        except Exception as e:
+            logger.error(f"Error getting addresses: {str(e)}")
+        return {}
+
+    def get_key(self, client: CommuneClient, netuid: int) -> dict[int, str]:
+        """
+        Retrieve all module keys from the subnet.
+
+        Args:
+            client: The CommuneClient instance used to query the subnet.
+            netuid: The unique identifier of the subnet.
+
+        Returns:
+            A dictionary mapping module IDs to their SS58 keys.
+        """
+        try:
+            return client.query_map_key(netuid)
+        except Exception as e:
+            logger.error(f"Error getting keys: {str(e)}")
+        return {}
 
     def split_ip_port(self, ip_port):
         # Check if the input is empty or None
@@ -181,10 +226,10 @@ class TranslateValidator(Module):
         else:
             return None, None
 
-    def _get_miner_prediction(
+    async def _get_miner_prediction(
         self,
-        prompt: str,
-        miner_info: tuple[list[str], Ss58Address],
+        miner_prompt: tuple,
+        miner_info: dict,
     ) -> str | None:
         """
         Prompt a miner module to generate an answer to the given question.
@@ -196,117 +241,220 @@ class TranslateValidator(Module):
         Returns:
             The generated answer from the miner module, or None if the miner fails to generate an answer.
         """
-        question, source_language, target_language = prompt
-        connection = miner_info['address']
-        miner_key = miner_info['key']
-        module_ip, module_port = self.split_ip_port(connection)
-
-        if module_ip == "None" or module_port == "None" or module_ip is None or module_port is None:
-            return ""
+        question, source_language, target_language = miner_prompt
+        miner_key = miner_info["key"]
+        module_ip, module_port = miner_info["address"].split(":")
 
         client = ModuleClient(module_ip, int(module_port), self.key)
 
         try:
-            miner_answer = asyncio.run(
-                client.call(
-                    "generate",
-                    miner_key,
-                    {"prompt": question, "source_language": source_language, "target_language": target_language},
-                    timeout=self.call_timeout,
-                )
+            miner_answer = await client.call(
+                "generate",
+                miner_key,
+                {"prompt": question, "source_language": source_language, "target_language": target_language},
+                timeout=self.call_timeout,
             )
             miner_answer = miner_answer["answer"]
             return miner_answer
         except Exception as e:
-            logger.error(f"Error getting miner response: {e}")
+            logger.error(f"Error getting prediction from miner {miner_key}: {str(e)}")
             return ""
 
-    def _return_miner_scores(
+    async def _return_miner_scores(
         self,
-        score: Dict[str, float],
-        miner_info: tuple[list[str], Ss58Address],
+        score: float,
+        miner_info: dict,
     ):
-        connection = miner_info['address']
-        miner_key = miner_info['key']
-        module_ip, module_port = self.split_ip_port(connection)
-
-        if module_ip == "None" or module_port == "None" or module_ip is None or module_port is None:
-            return False
+        miner_key = miner_info["key"]
+        module_ip, module_port = miner_info["address"].split(":")
 
         client = ModuleClient(module_ip, int(module_port), self.key)
 
         try:
-            send_miner_score = asyncio.run(
-                client.call(
-                    "score",
-                    miner_key,
-                    score,
-                    timeout=10
-                )
+            send_miner_score = await client.call(
+                "score",
+                miner_key,
+                score,
+                timeout=10
             )
             return send_miner_score['answer']
         except Exception as e:
+            logger.error(f"Error returning score to miner {miner_key}: {str(e)}")
             return False
 
-    def get_miners_to_query(self, miners: list[dict[str, Any]]):
-        current_weights = read_weight_file(self.weights_file)
-        miners_to_query = []
-        excluded_uids = set()
-        counter = 0
-        weights_changed = False
+    def get_miners_to_query(self) -> List[Dict[str, Any]]:
+        """Get list of miners to query."""
+        try:
+            # Clear previous miner info list
+            self.miner_info_list = []
+            
+            # Get maps from class attributes
+            query_map_key = self.keys_map
+            query_map_address = self.addresses_map
 
-        logger.info(f"Initial SCORED_MINERS: {current_weights}")
+            # Convert query results to dictionaries if they aren't already
+            if not isinstance(query_map_key, dict):
+                query_map_key = dict(query_map_key)
+            if not isinstance(query_map_address, dict):
+                query_map_address = dict(query_map_address)
 
-        for miner in miners:
-            uid = str(miner['uid'])
-            miner_key = miner['key']
-
-            if uid in current_weights:
-                if miner_key != current_weights[uid]['ss58']:
-                    # Miner has been deregistered and must be re-scored
-                    del current_weights[uid]
-                    weights_changed = True
-
-                # If the miner key matches and UID is in scored_miners, exclude it because it has already been scored
-                if uid in current_weights and miner_key == current_weights[uid]['ss58']:
-                    excluded_uids.add(uid)
+            for uid, ss58key in query_map_key.items():
+                address = query_map_address.get(uid)
+                # Skip miners with invalid addresses
+                if address in ["None:None", "0.0.0.0:8080"]:
+                    logger.debug(f"Skipping miner with invalid address - UID: {uid}, Key: {ss58key}, Address: {address}")
                     continue
+                    
+                miner_info = {
+                    "uid": uid,
+                    "address": address,
+                    "key": ss58key,
+                }
+                self.miner_info_list.append(miner_info)
 
-            miners_to_query.append(miner)
-            counter += 1
+            logger.info(f"Found {len(self.miner_info_list)} valid miners to query")
+            logger.debug(f"First few miners for debugging: {self.miner_info_list[:5] if self.miner_info_list else []}")
+            
+            return self.miner_info_list
 
-            if counter == 8:
-                break
+        except Exception as e:
+            logger.error(f"Error getting miners to query: {str(e)}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            # Don't clear the miner list on error, return what we have
+            return self.miner_info_list
 
-        remaining_miners = [miner for miner in miners if str(miner['uid']) not in excluded_uids]
+    async def run(self):
+        """Run the validator."""
+        try:
+            # Get validator UID using stored keys map
+            val_ss58 = self.key.ss58_address
+            for uid, ss58 in enumerate(self.keys_map):
+                if ss58.__str__() == val_ss58:
+                    self.uid = uid
+                    break
 
-        if weights_changed:
+            miners_to_query = self.get_miners_to_query()
+            
+            logger.info(f"Got {len(miners_to_query)} miners to query")
+            logger.debug(f"Miner addresses: {[m['address'] for m in miners_to_query]}")
+            
+            if not miners_to_query:
+                logger.warning("No miners to query")
+                return
+
+            miner_prompt = self.get_miner_prompt()
+
+            logger.debug("Source")
+            logger.debug(miner_prompt[1])
+            logger.debug("Target")
+            logger.debug(miner_prompt[2])
+            logger.debug("Prompt")
+            logger.debug(miner_prompt[0])
+
+            # Get predictions from all miners concurrently
+            logger.debug("Getting predictions from miners...")
+            miner_answers = await asyncio.gather(
+                *[self._get_miner_prediction(miner_prompt, miner) for miner in miners_to_query],
+                return_exceptions=True
+            )
+
+            # Filter out exceptions and failed responses
+            valid_answers = []
+            valid_miners = []
+            for miner, answer in zip(miners_to_query, miner_answers):
+                if isinstance(answer, Exception):
+                    logger.error(f"Error from miner {miner['key']}: {str(answer)}")
+                    continue
+                if not answer:  # Empty string response
+                    logger.warning(f"Empty response from miner {miner['key']}")
+                    continue
+                valid_answers.append(answer)
+                valid_miners.append(miner)
+
+            if not valid_answers:
+                logger.warning("No valid responses from miners")
+                return
+
+            scores, full_scores = self.reward.get_scores(miner_prompt[0], miner_prompt[2], valid_answers)
+
+            # Return scores to miners concurrently
+            logger.debug("Returning scores to miners...")
+            await asyncio.gather(
+                *[self._return_miner_scores(score, miner) for score, miner in zip(full_scores, valid_miners)],
+                return_exceptions=True
+            )
+
+            logger.debug("Miner prompt")
+            logger.debug(miner_prompt)
+            logger.debug("Valid miner answers")
+            logger.debug(valid_answers)
+            logger.debug("Raw scores")
+            logger.debug(scores)
+
+            # Create score dictionary using valid miners only
+            score_dict: dict[int, float] = {}
+            for miner, score in zip(valid_miners, scores):
+                uid = int(miner['uid'])  # Use the original UID from miner info
+                score_dict[uid] = score
+                logger.debug(f"Scoring miner {uid} with score {score}")
+
+            data_to_write = {}
+            logger.info(f"SCORE DICT: {score_dict}")
+            for miner in valid_miners:  # Use valid_miners here too
+                uid = int(miner['uid'])
+                ss58 = miner['key']
+                score = score_dict[uid]
+                data_to_write[uid] = {"ss58": ss58, "score": score}
+
+            current_weights = read_weight_file(self.weights_file)
+            for key, data in data_to_write.items():
+                current_weights[key] = data
+
             write_weight_file(self.weights_file, current_weights)
+            ddd = read_weight_file(self.weights_file)
+            logger.info(f"READ DATA: {ddd}")
 
-        logger.info(f"Updated SCORED_MINERS: {current_weights}")
-        logger.info(f"MINERS_TO_QUERY: {miners_to_query}")
+            logger.info("Miner UIDs")
+            logger.info([m['uid'] for m in valid_miners])
+            logger.info("Final scores")
+            logger.info(scores)
 
-        return remaining_miners, miners_to_query
+            if len(valid_miners) == 0:
+                scores = read_weight_file(self.weights_file)
+
+                s_dict: dict[int: float] = {}
+                for uid, data in scores.items():
+                    s_dict[uid] = data['score']
+
+                logger.info("SETTING WEIGHTS")
+                self.set_weights(s_dict)
+                write_weight_file(self.weights_file, {})
+                self.load_languages()
+
+        except Exception as e:
+            logger.error(f"Error running validator: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
 
     def get_miner_prompt(self) -> tuple:
         """
-        Generate a prompt for the miner modules.
-
-        Returns:
-            The generated prompt for the miner modules.
+        Generate a prompt for the miner modules by getting a single random sample
         """
+        # Select random source and target languages
         source_language = np.random.choice(self.languages).item()
-        target_languages = [language for language in self.languages if language != source_language]
-        target_language = np.random.choice(target_languages).item()
+        target_language = np.random.choice([lang for lang in self.languages if lang != source_language]).item()
+        
+        # Get a single random record from the source language
+        source_text = self.cc_100.get_random_record(source_language)
+        
+        # Create the prompt tuple
+        prompt = (source_text, source_language, target_language)
+        
+        logger.debug(f"Generated prompt: {source_language} -> {target_language}")
+        return prompt
 
-        source_datasets = self.datasets[source_language]
-        random_dataset_index = random.randint(0, len(source_datasets) - 1)
-        source_dataset = source_datasets[random_dataset_index]
-
-        source_text = source_dataset.get_random_record(source_language)
-        return source_text, source_language, target_language
-
-    async def validate_step(
+    def validate_step(
         self, netuid: int
     ) -> None:
         """
@@ -331,27 +479,26 @@ class TranslateValidator(Module):
             if ss58.__str__() == val_ss58:
                 self.uid = uid
 
-        remaining_miners, miners_to_query = self.get_miners_to_query(miners)
+        miners_to_query = self.get_miners_to_query()
 
-        miner_prompt, source_language, target_language = self.get_miner_prompt()
+        miner_prompt = self.get_miner_prompt()
 
         logger.debug("Source")
-        logger.debug(source_language)
+        logger.debug(miner_prompt[1])
         logger.debug("Target")
-        logger.debug(target_language)
+        logger.debug(miner_prompt[2])
         logger.debug("Prompt")
-        logger.debug(miner_prompt)
+        logger.debug(miner_prompt[0])
 
-        prompt = (miner_prompt, source_language, target_language)
         logger.debug("Creating miner prediction partial...")
-        get_miner_prediction = partial(self._get_miner_prediction, prompt)
+        get_miner_prediction = partial(self._get_miner_prediction, miner_prompt)
 
         logger.debug("Prompting miners...")
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
             it = executor.map(get_miner_prediction, miners_to_query)
             miner_answers = [*it]
 
-        scores, full_scores = self.reward.get_scores(miner_prompt, target_language, miner_answers)
+        scores, full_scores = self.reward.get_scores(miner_prompt[0], miner_prompt[2], miner_answers)
 
         for i, full_score in enumerate(full_scores):
             send_miner_score = partial(self._return_miner_scores, full_score)
@@ -367,32 +514,35 @@ class TranslateValidator(Module):
         logger.debug("Raw scores")
         logger.debug(scores)
 
+        # Create score dictionary using valid miners only, maintaining order
         score_dict: dict[int, float] = {}
-        for uid, score in zip([m['uid'] for m in miners_to_query], scores):
-            score_dict[uid] = score
-
         data_to_write = {}
-        logger.info(f"SCORE DICT: {score_dict}")
-        for item in miners_to_query:
-            ss58 = item['key']
-            uid = int(item['uid'])
-            score = score_dict[uid]
+        
+        # Process miners and scores together to maintain order
+        for idx, (miner, score) in enumerate(zip(valid_miners, scores)):
+            uid = int(miner['uid'])
+            ss58 = miner['key']
+            score_dict[uid] = score
             data_to_write[uid] = {"ss58": ss58, "score": score}
-
+            logger.debug(f"Processing miner {idx}: UID {uid}, Key {ss58}, Score {score}")
+        
+        logger.info(f"SCORE DICT: {score_dict}")
+        
+        # Update weights file in one operation
         current_weights = read_weight_file(self.weights_file)
-        for key, data in data_to_write.items():
-            current_weights[key] = data
-
+        current_weights.update(data_to_write)
         write_weight_file(self.weights_file, current_weights)
+        
         ddd = read_weight_file(self.weights_file)
         logger.info(f"READ DATA: {ddd}")
-
+        
+        # Log UIDs and scores in guaranteed matching order
+        miner_uids = [int(m['uid']) for m in valid_miners]
         logger.info("Miner UIDs")
-        logger.info([m['uid'] for m in miners_to_query])
+        logger.info(miner_uids)
         logger.info("Final scores")
         logger.info(scores)
-
-        if len(remaining_miners) == 0:
+        if len(miners_to_query) == 0:
             scores = read_weight_file(self.weights_file)
 
             s_dict: dict[int: float] = {}
@@ -404,10 +554,11 @@ class TranslateValidator(Module):
             write_weight_file(self.weights_file, {})
             self.load_languages()
 
-    def validation_loop(self, interval: int = 20) -> None:
+    def validation_loop(self, config) -> None:
         while True:
             logger.info("Begin validator step ... ")
-            asyncio.run(self.validate_step(self.netuid))
+            asyncio.run(self.run())
+            interval = config.get_validator_interval()
             logger.info(f"Sleeping for {interval} seconds ... ")
             time.sleep(interval)
 
@@ -415,47 +566,52 @@ class TranslateValidator(Module):
         """
         Set weights for miners based on their normalized and power scaled scores.
         """
-        full_score_dict = s_dict
-        weighted_scores: dict[int: float] = {}
+        while True:
+            try:
+                # Convert scores to list format for normalization
+                uids = list(s_dict.keys())
+                scores = list(s_dict.values())
+                
+                if not scores:  # If we have no scores, skip setting weights
+                    logger.warning("No scores available, skipping weight setting")
+                    return
+                
+                logger.info(f"Setting weights for {len(scores)} miners")
+                logger.info(f"Raw scores: {scores}")
 
-        abnormal_scores = full_score_dict.values()
-        normal_scores = normalize_scores(abnormal_scores)
-        score_dict = {uid: score for uid, score in zip(full_score_dict.keys(), normal_scores)}
-        power_scaled_scores = conditional_power_scaling(score_dict)
-        scores = sum(power_scaled_scores.values())
+                # Check if all scores are zero
+                if all(s == 0 for s in scores):
+                    logger.warning("All scores are zero, setting equal weights")
+                    normalized_weights = [1.0/len(scores)] * len(scores)
+                else:
+                    # Normalize weights
+                    normalized_weights = normalize_scores(scores)
+                
+                logger.info(f"Normalized weights: {normalized_weights}")
 
-        for uid, score in power_scaled_scores.items():
-            weight = score * 1000 / scores
-            weighted_scores[uid] = weight
+                # Power scale weights
+                power_scaled_weights = conditional_power_scaling(normalized_weights)
+                logger.info(f"Power scaled weights: {power_scaled_weights}")
 
-        weighted_scores = {k: v for k, v in zip(
-            weighted_scores.keys(), normalize_scores(weighted_scores.values())) if v != 0}
+                # Convert to integer weights for the chain
+                values = [int(w * 65535) for w in power_scaled_weights]
+                
+                # Convert UIDs from strings to integers
+                uids = [int(uid) for uid in uids]
 
-        if self.uid is not None and str(self.uid) in weighted_scores:
-            del weighted_scores[str(self.uid)]
-            logger.info(f"REMOVING UID !!!!!! {self.uid}")
-        else:
-            logger.info("NOT REMOVING ANY UID")
+                logger.info(f"Setting weights for UIDs: {uids}")
+                logger.info(f"Setting values: {values}")
 
-        uids = list(weighted_scores.keys())
-        intuids = [eval(i) for i in uids]
-        weights = list(weighted_scores.values())
-        intweights = [int(weight * 1000) for weight in weights]
-
-        logger.info("**********************************")
-        logger.info(f"UIDS: {intuids}")
-        logger.info(f"WEIGHTS TO SET: {intweights}")
-        logger.info("**********************************")
-
-        try:
-            self.client.vote(key=self.key, uids=intuids, weights=intweights, netuid=self.netuid)
-        except Exception as e:
-            logger.error(f"WARNING: Failed to set weights with exception: {e}. Will retry.")
-            sleepy_time = random.uniform(1, 2)
-            time.sleep(sleepy_time)
-            # retry with a different node
-            self.client = CommuneClient(get_node_url(use_testnet=self.use_testnet))
-            self.client.vote(key=self.key, uids=intuids, weights=intweights, netuid=self.netuid)
+                self.client.set_weights(self.netuid, uids, values, key=self.key)
+                break  # If successful, break out of the retry loop
+            except Exception as e:
+                if hasattr(e, 'code') and e.code == 1014:
+                    logger.warning("Transaction priority too low, waiting 5 seconds before retry...")
+                    time.sleep(5)
+                    continue
+                else:
+                    logger.error(f"Error setting weights: {e}")
+                    raise
 
 
 if __name__ == '__main__':
@@ -495,4 +651,4 @@ if __name__ == '__main__':
     )
 
     logger.info("Running validator ... ")
-    validator.validation_loop(interval=interval)
+    validator.validation_loop(validator_config)

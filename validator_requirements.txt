@@ -1,4 +1,3 @@
-communex
 typer
 uvicorn
 keylimiter
@@ -9,3 +8,4 @@ unbabel-comet
 bert-score
 datasets
 langid
+safetensors>=0.4.1

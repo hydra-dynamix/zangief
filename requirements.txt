@@ -10,4 +10,4 @@ bert-score
 datasets
 langid
 openai
-huggingface-cli
+huggingface-hub
