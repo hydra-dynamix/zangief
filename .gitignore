@@ -11,6 +11,8 @@
 weights1.json
 testing.py
 **/__pycache__
+**/*.pyc
+/venv
 
 
 node_modules

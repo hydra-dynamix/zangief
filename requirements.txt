@@ -11,3 +11,9 @@ datasets
 langid
 openai
 huggingface-hub
+torch
+torchvision
+torchaudio
+transformers
+sentencepiece
+
