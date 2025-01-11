@@ -21,8 +21,12 @@ This PR adds Docker support to the Zangief validator and includes several improv
 - Updated gitignore to handle `__pycache__` directories
 - Updated requirements.txt with correct package names
 - Added dotenv support in miner code
+- Added async miner request handling
 - Fixed subnet UID handling in CLI
+- Fixed miner UID handling in CLI
 - Modified validator code for better configuration management
+- Simplified language buffering to use less memory
+- Updated the ckpt model to .safetensors for security
 
 ### Documentation
 - Added comprehensive Docker usage documentation

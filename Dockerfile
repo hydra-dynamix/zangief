@@ -34,8 +34,8 @@ COPY pyproject.toml .
 # Install the package
 RUN pip install -e .
 
-# Copy environment file
-COPY .env .
+# Copy environment example file
+COPY .env.example .env.example
 
 # Set environment variables
 ENV PYTHONPATH=/app/src

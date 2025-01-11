@@ -60,12 +60,10 @@ The validator is available as a Docker image from GitHub Container Registry. You
 
 ### Using Docker Compose (Recommended)
 
-1. Create a `.env` file with your configuration:
-```env
-TESTNET=0
-KEY_NAME=your_key_name
-VALIDATOR_CALL_TIMEOUT=20
-VALIDATOR_INTERVAL=10
+1. Copy the example environment file and configure it:
+```bash
+cp .env.example .env
+# Edit .env with your configuration
 ```
 
 2. Run with docker-compose:
@@ -76,11 +74,15 @@ docker-compose up -d
 ### Using Docker Directly
 
 ```bash
+# Copy and configure environment file
+cp .env.example .env
+# Edit .env with your configuration
+
 docker pull ghcr.io/opentensor/zangief-validator:latest
 docker run -d \
   --name zangief-validator \
+  --env-file .env \
   -v $(pwd)/logs:/app/logs \
-  -v $(pwd)/.env:/app/.env \
   ghcr.io/opentensor/zangief-validator:latest
 ```
 
@@ -89,11 +91,15 @@ docker run -d \
 If you want to build the image locally:
 
 ```bash
+# Copy and configure environment file
+cp .env.example .env
+# Edit .env with your configuration
+
 docker build -t zangief-validator .
 docker run -d \
   --name zangief-validator \
+  --env-file .env \
   -v $(pwd)/logs:/app/logs \
-  -v $(pwd)/.env:/app/.env \
   zangief-validator
 ```
 
