@@ -54,5 +54,53 @@ The scoring system used by the validators is a custom quality score that is adju
 * **Zangief document translator** - web app to provide high quality translations for long-form text that maintains style and tone
 * **Zangief multi-modal translator** - app that provides real-time translation of audio, visual, or text input 
 
-## Further reading
+## Docker Usage
 
+The validator is available as a Docker image from GitHub Container Registry. You can run it in two ways:
+
+### Using Docker Compose (Recommended)
+
+1. Copy the example environment file and configure it:
+```bash
+cp .env.example .env
+# Edit .env with your configuration
+```
+
+2. Run with docker-compose:
+```bash
+docker-compose up -d
+```
+
+### Using Docker Directly
+
+```bash
+# Copy and configure environment file
+cp .env.example .env
+# Edit .env with your configuration
+
+docker pull ghcr.io/opentensor/zangief-validator:latest
+docker run -d \
+  --name zangief-validator \
+  --env-file .env \
+  -v $(pwd)/logs:/app/logs \
+  ghcr.io/opentensor/zangief-validator:latest
+```
+
+### Building Locally
+
+If you want to build the image locally:
+
+```bash
+# Copy and configure environment file
+cp .env.example .env
+# Edit .env with your configuration
+
+docker build -t zangief-validator .
+docker run -d \
+  --name zangief-validator \
+  --env-file .env \
+  -v $(pwd)/logs:/app/logs \
+  zangief-validator
+```
+
+## Further reading

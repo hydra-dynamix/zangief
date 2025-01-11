@@ -13,3 +13,6 @@ class Config:
             "interval": config.get("validator", "interval"),
             "testnet": config.get("validator", "isTestnet"),
         }
+
+    def get_validator_interval(self):
+        return int(self.validator["interval"])

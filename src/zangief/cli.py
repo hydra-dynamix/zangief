@@ -5,10 +5,11 @@ from communex._common import get_node_url  # type: ignore
 from communex.client import CommuneClient  # type: ignore
 from communex.compat.key import classic_load_key  # type: ignore
 
-from validator.config import ValidatorSettings
-from validator.validator import get_subnet_netuid, TranslateValidator
+from validator.config import Config as ValidatorSettings
+from validator.validator import get_netuid, TranslateValidator
 
 app = typer.Typer()
+
 
 
 @app.command("serve-subnet")
@@ -19,9 +20,9 @@ def serve(
     call_timeout: int = 65,
 ):
     keypair = classic_load_key(commune_key)  # type: ignore
-    settings = ValidatorSettings()  # type: ignore
+    settings = ValidatorSettings("/home/administrator/repos/module_validator_rust/subnets/zangief.git/env/config.ini")  # type: ignore
     c_client = CommuneClient(get_node_url())
-    subnet_uid = get_subnet_netuid("zangief")
+    subnet_uid = 13
     validator = TranslateValidator(
         keypair,
         subnet_uid,

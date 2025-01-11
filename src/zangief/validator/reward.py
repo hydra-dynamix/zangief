@@ -1,14 +1,27 @@
 from comet import download_model, load_from_checkpoint
 from bert_score import BERTScorer
 import langid
+import os
+from safetensors.torch import save_file, load_file
+import torch
 
 
 class Reward:
 
     def __init__(self, device="cpu"):
         comet_model_path = download_model("Unbabel/wmt20-comet-qe-da")
+        
+        safe_model_path = comet_model_path.replace('.ckpt', '.safetensors')
+        if not os.path.exists(safe_model_path):
+            checkpoint = load_from_checkpoint(comet_model_path)
+            state_dict = checkpoint.state_dict()
+            save_file(state_dict, safe_model_path)
+            
+        state_dict = load_file(safe_model_path)
         self.comet_model = load_from_checkpoint(comet_model_path)
+        self.comet_model.load_state_dict(state_dict)
         self.comet_model.eval()
+
         self.bert_model = BERTScorer(
             model_type="bert-base-multilingual-cased", device=device
         )
